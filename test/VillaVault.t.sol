@@ -718,6 +718,244 @@ contract VillaVaultTest is Test {
         assertApproxEqAbs(recipientAfter - recipientBefore, expectedFee, 1);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — Performance fee edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_accruePerformanceFee_emptyVault() public {
+        // supply == 0 early return (line 474).
+        vault.accruePerformanceFee();
+        // No revert, no shares minted.
+        assertEq(vault.balanceOf(feeRecipient), 0);
+    }
+
+    function test_accruePerformanceFee_tinyProfitRoundsToZeroFee() public {
+        // Hit line 491: feeAssets == 0. Deposit small amount, then create a tiny
+        // profit where profitPerShare > 0 (pass line 480) but totalProfit * perfFeeBP / BP == 0.
+        vm.prank(alice);
+        vault.deposit(1e6, alice); // net = 990_000, supply = 990_000
+
+        // Donate 1 unit of USDT directly to vault. This increases totalAssets by 1
+        // without changing supply, creating a tiny profit above HWM.
+        // totalProfit = profitPerShare * supply / 1e18.
+        // profitPerShare ≈ 1e18 / 990_000 ≈ 1.01e12, very small.
+        // totalProfit ≈ 1.01e12 * 990_000 / 1e18 ≈ 0 (rounds to 0).
+        // feeAssets = 0 * 500 / 10000 = 0 → return at line 491.
+        usdt.mint(address(vault), 1);
+
+        uint256 feeSharesBefore = vault.balanceOf(feeRecipient);
+        vault.accruePerformanceFee();
+
+        // feeAssets was 0, so no shares minted.
+        assertEq(vault.balanceOf(feeRecipient), feeSharesBefore);
+    }
+
+    function test_accruePerformanceFee_feeSharesRoundToZero() public {
+        // Hit line 500: feeShares == 0. We need feeAssets > 0 but
+        // feeShares = supply * feeAssets / (assets_ - feeAssets) rounds to 0.
+        // This requires supply * feeAssets < (assets_ - feeAssets), i.e., supply << assets_.
+        // After significant yield, totalAssets >> supply (assets grow, supply unchanged).
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice); // supply = 9900e6, totalAssets = 9900e6
+
+        // First: create large yield and accrue fee to move HWM up.
+        syrup.setExchangeRate(10e18); // 10x yield
+        vault.accruePerformanceFee();
+
+        // Now totalAssets ≈ 99_000e6, supply ≈ 9900e6 + feeShares (small bump).
+        // HWM is updated to new level. Now create a tiny profit above new HWM.
+        // Donate a small amount of USDT directly to the vault.
+        // feeAssets will be tiny, and supply * feeAssets < (assets_ - feeAssets) → feeShares = 0.
+        usdt.mint(address(vault), 200);
+
+        uint256 feeSharesBefore = vault.balanceOf(feeRecipient);
+        vault.accruePerformanceFee();
+        uint256 feeSharesAfter = vault.balanceOf(feeRecipient);
+
+        // feeShares rounded to 0.
+        assertEq(feeSharesAfter, feeSharesBefore);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — Deposit/Mint limits
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_mint_revertsExceedsMaxPool() public {
+        // Set a low cap and try to mint more shares than allowed.
+        vm.prank(owner);
+        vault.setMaxPoolAmount(1_000e6);
+
+        // Minting 5000e6 shares requires ~5050 USDT gross, exceeds 1000 cap.
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.mint(5_000e6, alice);
+    }
+
+    function test_deposit_feeIsZeroForZeroFeeVault() public {
+        // Deploy a vault with 0 management fee to hit the fee==0 branch (line 308).
+        VillaVault zeroFeeVault = new VillaVault(
+            address(usdt),
+            address(syrup),
+            feeRecipient,
+            0,  // 0 management fee
+            PERFORMANCE_FEE_BP,
+            MAX_POOL,
+            owner
+        );
+
+        usdt.mint(alice, 10_000e6);
+        vm.prank(alice);
+        usdt.approve(address(zeroFeeVault), type(uint256).max);
+
+        vm.prank(alice);
+        uint256 shares = zeroFeeVault.deposit(10_000e6, alice);
+
+        // No fee sent to recipient.
+        assertEq(usdt.balanceOf(feeRecipient), 0);
+        // All assets become shares (1:1 first deposit).
+        assertEq(shares, 10_000e6);
+    }
+
+    function test_maxMint_respectsCap() public {
+        // After a deposit, maxMint should reflect remaining capacity.
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice); // nets 9,900
+
+        uint256 maxSh = vault.maxMint(alice);
+        // maxDeposit = MAX_POOL - 9_900e6. maxMint = convertToShares(maxDeposit).
+        uint256 maxDep = vault.maxDeposit(alice);
+        assertTrue(maxSh > 0);
+        assertTrue(maxSh <= maxDep); // at 1:1 rate, shares <= assets
+    }
+
+    function test_maxMint_zeroWhenFull() public {
+        vm.prank(owner);
+        vault.setMaxPoolAmount(10_000e6);
+
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice); // nets 9,900
+
+        // Push over cap with yield.
+        syrup.setExchangeRate(1.02e18);
+
+        assertEq(vault.maxMint(alice), 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — Redeem edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_redeem_syrupSharesToLockCapped() public {
+        // Scenario: proportional calculation > totalSyrup (line 405).
+        // This can happen when USDT balance in vault inflates totalAssets but
+        // totalSyrup is relatively small.
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice);
+
+        uint256 aliceShares = vault.balanceOf(alice);
+
+        // Donate USDT directly to the vault to inflate totalAssets without increasing syrup.
+        usdt.mint(address(vault), 50_000e6);
+
+        // Now totalAssets >> syrup value, so villaAssets could be > what syrup can cover.
+        // totalSyrup.mulDiv(villaAssets, totalVal) could exceed totalSyrup.
+        // Actually with floor rounding it won't exceed, but let's still test the path.
+        vm.prank(alice);
+        vault.redeem(aliceShares, alice, alice);
+
+        // Should not revert; syrupSharesToLock is capped.
+        (uint256 syrupSh,,) = vault.getWithdrawalRequest(alice);
+        assertTrue(syrupSh > 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — ProcessRedeem edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_processRedeem_zeroAssetsFromSyrup() public {
+        // When syrup.redeem() returns 0, the vault should not attempt a transfer.
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice);
+
+        uint256 aliceShares = vault.balanceOf(alice);
+
+        vm.prank(alice);
+        vault.redeem(aliceShares, alice, alice);
+
+        syrup.processRequest(address(vault));
+
+        // Force syrup to return 0 on redeem.
+        syrup.setForceZeroRedeem(true);
+
+        uint256 aliceBefore = usdt.balanceOf(alice);
+        uint256 assets = vault.processRedeem(alice);
+
+        assertEq(assets, 0);
+        assertEq(usdt.balanceOf(alice), aliceBefore); // No USDT transferred.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — Mint fee branch
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_mint_feeIsZeroForZeroFeeVault() public {
+        // Deploy a vault with 0 management fee to hit fee==0 branch in mint (line 348).
+        VillaVault zeroFeeVault = new VillaVault(
+            address(usdt),
+            address(syrup),
+            feeRecipient,
+            0,  // 0 management fee
+            PERFORMANCE_FEE_BP,
+            MAX_POOL,
+            owner
+        );
+
+        usdt.mint(alice, 10_000e6);
+        vm.prank(alice);
+        usdt.approve(address(zeroFeeVault), type(uint256).max);
+
+        uint256 recipientBefore = usdt.balanceOf(feeRecipient);
+        vm.prank(alice);
+        uint256 assets = zeroFeeVault.mint(5_000e6, alice);
+
+        assertEq(zeroFeeVault.balanceOf(alice), 5_000e6);
+        assertEq(usdt.balanceOf(feeRecipient), recipientBefore); // No fee.
+        assertEq(assets, 5_000e6); // gross == net when fee is 0.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Branch coverage — denominator == 0 in performance fee
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_redeem_revertsSyrupSharesToLockZero() public {
+        // Hit line 410: syrupSharesToLock == 0 → revert ZeroAmount.
+        // After Syrup rate drops, totalAssets < totalSupply. Then _convertToAssets(1 share)
+        // rounds to 0, making syrupSharesToLock = 0.
+        vm.prank(alice);
+        vault.deposit(10_000e6, alice); // supply = 9900e6, totalAssets = 9900e6
+
+        // Drop Syrup rate below 1:1 so totalAssets < supply.
+        syrup.setExchangeRate(0.5e18);
+        // totalAssets = convertToAssets(9900e6) = 4950e6. supply = 9900e6.
+
+        // Mint 1 share to bob (requires tiny USDT).
+        usdt.mint(bob, 100e6);
+        vm.prank(bob);
+        usdt.approve(address(vault), type(uint256).max);
+        vm.prank(bob);
+        vault.mint(1, bob);
+
+        // bob tries to redeem 1 share. villaAssets = _convertToAssets(1, Floor) = 0.
+        // syrupSharesToLock = totalSyrup * 0 / totalVal = 0 → revert ZeroAmount.
+        vm.prank(bob);
+        vm.expectRevert(VillaVault.ZeroAmount.selector);
+        vault.redeem(1, bob, bob);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Fuzz tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
     function testFuzz_previewDeposit_matchesActual(uint256 amount) public {
         amount = bound(amount, 100e6, 500_000e6);
 

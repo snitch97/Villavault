@@ -21,6 +21,9 @@ contract MockSyrup is ERC20 {
     /// @dev Whether a pending request has been "processed" (ready to claim).
     mapping(address => bool) public requestProcessed;
 
+    /// @dev When true, redeem() returns 0 assets (simulates zero-value redemption).
+    bool public forceZeroRedeem;
+
     constructor(address _asset) ERC20("Syrup Pool Share", "SYR") {
         asset = IERC20(_asset);
     }
@@ -60,9 +63,19 @@ contract MockSyrup is ERC20 {
             requestProcessed[owner] = false;
         }
 
+        if (forceZeroRedeem) {
+            _burn(address(this), shares);
+            return 0;
+        }
+
         assets = convertToAssets(shares);
         _burn(address(this), shares);
         asset.transfer(receiver, assets);
+    }
+
+    /// @dev Test helper: force redeem() to return 0 assets.
+    function setForceZeroRedeem(bool _force) external {
+        forceZeroRedeem = _force;
     }
 
     /// @notice Convert shares to assets using the current exchange rate.

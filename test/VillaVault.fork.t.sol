@@ -17,9 +17,6 @@ contract VillaVaultForkTest is Test {
     address constant SYRUP_POOL = 0x356B8d89c1e1239Cbbb9dE4815c39A1474d5BA7D;
     address constant FEE_RECIPIENT = 0x6AfDD1DaD70708230aC27620775df9897938a76D;
 
-    // Whale address with substantial USDT balance for testing.
-    address constant USDT_WHALE = 0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503;
-
     address public deployer = makeAddr("deployer");
     address public alice = makeAddr("alice");
 
@@ -40,9 +37,8 @@ contract VillaVaultForkTest is Test {
             deployer
         );
 
-        // Fund alice from the whale.
-        vm.prank(USDT_WHALE);
-        IERC20(USDT).transfer(alice, 100_000e6);
+        // Fund alice using Foundry's deal() cheatcode (no whale dependency).
+        deal(USDT, alice, 100_000e6);
 
         vm.prank(alice);
         IERC20(USDT).approve(address(vault), type(uint256).max);
@@ -80,10 +76,9 @@ contract VillaVaultForkTest is Test {
     }
 
     function test_fork_deposit_multipleUsers() public {
-        // Fund bob.
+        // Fund bob using deal().
         address bob = makeAddr("bob");
-        vm.prank(USDT_WHALE);
-        IERC20(USDT).transfer(bob, 50_000e6);
+        deal(USDT, bob, 50_000e6);
         vm.prank(bob);
         IERC20(USDT).approve(address(vault), type(uint256).max);
 

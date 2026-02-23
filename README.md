@@ -1,66 +1,101 @@
-## Foundry
+# VillaVault
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+ERC-4626 tokenized vault that wraps the [Maple Finance Syrup](https://syrup.fi/) USDT pool, adding management and performance fees with a high-water mark mechanism.
 
-Foundry consists of:
+## Architecture
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```
+User ──deposit()──► VillaVault ──deposit()──► Maple Syrup Pool
+User ◄──processRedeem()── VillaVault ◄──redeem()── Maple Syrup Pool
 ```
 
-### Test
+- **Deposits** are atomic: USDT is swept into Syrup immediately after deducting the management fee.
+- **Withdrawals** are asynchronous (two-step): `redeem()` submits a request to Maple's WithdrawalManager queue; `processRedeem()` claims the USDT once Maple has processed it.
+- **Villa shares** (ERC-20) represent a proportional claim on the vault's Syrup position.
+- Inherits OpenZeppelin v5 `ERC4626` for virtual-shares inflation-attack protection.
 
-```shell
-$ forge test
+## Fee Structure
+
+| Fee | Rate | Mechanism |
+|-----|------|-----------|
+| Management fee | 1% (100 BP) | Deducted from each deposit in USDT, sent to `feeRecipient` |
+| Performance fee | 5% (500 BP) | Minted as Villa shares on profit above a global high-water mark (HWM) |
+
+- Both fee parameters and the fee recipient are **immutable** (set at deployment).
+- Performance fees are accrued automatically before every deposit and redemption.
+- The HWM ensures fees are only charged on *new* profits, preventing double-charging.
+
+## Build
+
+```bash
+forge build
 ```
 
-### Format
+## Test
 
-```shell
-$ forge fmt
+Unit tests (mocked Syrup):
+
+```bash
+forge test --match-contract VillaVaultTest -v
 ```
 
-### Gas Snapshots
+Fork tests (real Syrup on mainnet):
 
-```shell
-$ forge snapshot
+```bash
+forge test --match-contract VillaVaultForkTest --fork-url $MAINNET_RPC_URL -vvv
 ```
 
-### Anvil
+Coverage:
 
-```shell
-$ anvil
+```bash
+forge coverage --no-match-contract Fork
 ```
 
-### Deploy
+## Deploy
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+```bash
+# Sepolia
+forge script script/Deploy.s.sol --rpc-url $SEPOLIA_RPC_URL --broadcast --verify -vvvv
+
+# Mainnet
+forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify -vvvv
 ```
 
-### Cast
+The deploy script auto-detects the network via `block.chainid` and uses the correct USDT/Syrup addresses.
 
-```shell
-$ cast <subcommand>
+### Environment Variables
+
+Copy `.env` and fill in:
+
+| Variable | Description |
+|----------|-------------|
+| `PRIVATE_KEY` | Deployer private key |
+| `MAINNET_RPC_URL` | Ethereum mainnet RPC |
+| `SEPOLIA_RPC_URL` | Sepolia testnet RPC |
+| `ETHERSCAN_API_KEY` | For contract verification |
+
+## Contract Addresses
+
+| Network | Address |
+|---------|---------|
+| Sepolia | *Not yet deployed* |
+| Mainnet | *Not yet deployed* |
+
+## Security
+
+Static analysis with Slither:
+
+```bash
+slither src/VillaVault.sol
 ```
 
-### Help
+Key design choices:
+- **Immutable fees**: No admin function to change fee rates or recipient post-deployment.
+- **No pause/emergency withdrawal**: Reduces admin risk surface.
+- **CEI pattern**: State is cleared before external calls in `processRedeem`.
+- **SafeERC20**: All USDT transfers use `safeTransfer` / `safeTransferFrom`.
+- **Pool cap**: Owner can set `maxPoolAmount` to limit TVL.
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+## License
+
+MIT
