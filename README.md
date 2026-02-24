@@ -76,10 +76,11 @@ Copy `.env` and fill in:
 
 ## Contract Addresses
 
-| Network | Address |
-|---------|---------|
-| Sepolia | *Not yet deployed* |
-| Mainnet | *Not yet deployed* |
+| Network | Contract | Address |
+|---------|----------|---------|
+| Sepolia | VillaVault | [`0xBD8dDf12950a805aB0437b922B82D641E8BeE03D`](https://sepolia.etherscan.io/address/0xBD8dDf12950a805aB0437b922B82D641E8BeE03D) |
+| Sepolia | MockSyrup | [`0xEcF55D28372a631dcD507ee348a8b106d86630D0`](https://sepolia.etherscan.io/address/0xEcF55D28372a631dcD507ee348a8b106d86630D0) |
+| Mainnet | VillaVault | *Not yet deployed* |
 
 ## Security
 
